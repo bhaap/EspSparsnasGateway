@@ -1,14 +1,23 @@
 /*
  * Based on code from user Sommarlov @ EF: http://elektronikforumet.com/forum/viewtopic.php?f=2&t=85006&start=255#p1357610
  * Which in turn is based on Strigeus work: https://github.com/strigeus/sparsnas_decoder
- * 
- * 
+ *
+ *
  */
 
+#include <ArduinoOTA.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <ESP8266HTTPUpdateServer.h>
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include "RFM69registers.h"
 #include <Arduino.h>
 #include <SPI.h>
 
+
+#define MQTT_VERSION MQTT_VERSION_3_1_1
 #define RF69_MODE_SLEEP 0      // XTAL OFF
 #define RF69_MODE_STANDBY 1    // XTAL ON
 #define RF69_MODE_SYNTH 2      // PLL ON
@@ -17,6 +26,28 @@
 
 #define SENSOR_ID 650337 //<- ange din 6 siffriga kod här, ta sista 6 siffrorna av 400 666 111. Koden finns i sändaren under batteriet
 #define PULSES_PER_KWH 1000 // <- samma här, står på elmätaren
+
+ESP8266WebServer httpServer(80);
+ESP8266HTTPUpdateServer httpUpdater;
+
+// Wifi: SSID and password
+const char* host = "sparsnas-webupdate";
+const char* WIFI_SSID = "*****";
+const char* WIFI_PASSWORD = "*****";
+
+// MQTT: ID, server IP, port, username and password
+const char* MQTT_CLIENT_ID = "sparsnas";
+const char* MQTT_SERVER_IP = "192.168.'**'.**";
+const uint16_t MQTT_SERVER_PORT = 1883;
+const char* MQTT_USER = "****";
+const char* MQTT_PASSWORD = "*****";
+
+// MQTT: topic
+const char* MQTT_SENSOR_TOPIC = "sparsnas";
+
+WiFiClient wifiClient;
+PubSubClient client(wifiClient);
+
 
 uint32_t FXOSC = 32000000;
 uint32_t TwoPowerToNinteen = 524288; // 2^19
@@ -46,6 +77,30 @@ unsigned long lastRecievedData = millis();
 void setup() {
   Serial.begin(115200);
 
+  Serial.println();
+  Serial.println();
+  Serial.print("INFO: Connecting to: ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("INFO: WiFi connected");
+  Serial.println("INFO: IP-address: ");
+  Serial.println(WiFi.localIP());
+
+  // init the MQTT connection
+  client.setServer(MQTT_SERVER_IP, MQTT_SERVER_PORT);
+  client.setCallback(callback);
+
+  MDNS.begin(host);
+  httpUpdater.setup(&httpServer);
+  httpServer.begin();
+  MDNS.addService("http", "tcp", 80);
   // Calc encryption key, used for bytes 5-17
   const uint32_t sensor_id_sub = SENSOR_ID - 0x5D38E8CB;
   enc_key[0] = (uint8_t)(sensor_id_sub >> 24);
@@ -55,14 +110,61 @@ void setup() {
   enc_key[4] = (uint8_t)(sensor_id_sub >> 16);
 
   if (!initialize(FREQUENCY)) {
-    Serial.println("Unable to initialize the radio. Exiting.");
+    Serial.println("ERROR: Unable to initialize the radio. Exiting.");
     while (1) {
       yield();
     }
   }
-  Serial.println("Listening on " + String(getFrequency()) + "hz.");
+  Serial.println("INFO: Listening on " + String(getFrequency()) + "hz.");
 
-  Serial.println("Done in setup.");
+  Serial.println("INFO: Done in setup.");
+  String output;
+}
+
+void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("INFO: Connecting to MQTT server...");
+    // Attempt to connect
+    if (client.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("INFO: Connected");
+    } else {
+      Serial.print("ERROR: Unable to connect, rc=");
+      Serial.print(client.state());
+      Serial.println("DEBUG: Trying again in 5 sec");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+
+void publishData(float f_sequence, float f_wattage, float f_kwh, float f_batt) {
+  // create a JSON object
+  // doc : https://github.com/bblanchon/ArduinoJson/wiki/API%20Reference
+  StaticJsonBuffer<300> jsonBuffer;
+  JsonObject& root = jsonBuffer.createObject();
+  // INFO: the data must be converted into a string; a problem occurs when using floats...
+  root["sequence"] = (String)f_sequence;
+  root["watt"] = (String)f_wattage;
+  root["kwh"] = (String)f_kwh;
+  root["battery"] = (String)f_batt;
+  root.prettyPrintTo(Serial);
+  Serial.println("");
+  /*
+     {
+        "sequence": "12" ,
+        "watt": "432.7",
+        "kwh": "44.1",
+        "battery": "100"
+     }
+  */
+  char data[300];
+  root.printTo(data, root.measureLength() + 1);
+  client.publish(MQTT_SENSOR_TOPIC, data, true);
 }
 
 bool initialize(uint32_t frequency) {
@@ -82,7 +184,7 @@ bool initialize(uint32_t frequency) {
     /* 0x25 */ {REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_01},              // PayloadReady
     /* 0x26 */ {REG_DIOMAPPING2, RF_DIOMAPPING2_CLKOUT_OFF},          // DIO5 ClkOut disable for power saving
     /* 0x28 */ {REG_IRQFLAGS2, RF_IRQFLAGS2_FIFOOVERRUN},              // writing to this bit ensures that the FIFO & status flags are reset
-    /* 0x29 */ {REG_RSSITHRESH, RSSITHRESHOLD},                    
+    /* 0x29 */ {REG_RSSITHRESH, RSSITHRESHOLD},
     /* 0x2D */ {REG_PREAMBLELSB, 3}, // default 3 preamble bytes 0xAAAAAA
     /* 0x2E */ {REG_SYNCCONFIG, RF_SYNC_ON | RF_SYNC_FIFOFILL_AUTO | RF_SYNC_SIZE_2 | RF_SYNC_TOL_0},
     /* 0x2F */ {REG_SYNCVALUE1, (uint8_t)(SYNCVALUE >> 8)},
@@ -129,7 +231,7 @@ bool initialize(uint32_t frequency) {
     delay(1);
   }
   if (millis() - start >= timeout) {
-    Serial.println("Failed on waiting for ModeReady()");
+    Serial.println("ERROR: Failed on waiting for ModeReady()");
     return false;
   }
   attachInterrupt(_interruptNum, interruptHandler, RISING);
@@ -245,8 +347,6 @@ void interruptHandler() {
 
     uint32_t rcv_sensor_id = TEMPDATA[5] << 24 | TEMPDATA[6] << 16 | TEMPDATA[7] << 8 | TEMPDATA[8];
 
-    String output;
-
     if (TEMPDATA[0] != 0x11 || TEMPDATA[1] != (SENSOR_ID & 0xFF) || TEMPDATA[3] != 0x07 || rcv_sensor_id != SENSOR_ID) {
       /*
       output = "Bad package: ";
@@ -284,16 +384,14 @@ void interruptHandler() {
       float watt;
       if(TEMPDATA[4]^0x0f == 1){
         watt = (float)((3600000 / PULSES_PER_KWH) * 1024) / (effect);
-      } else if(TEMPDATA[4^0x0f == 2){
+      } else if(TEMPDATA[4]^0x0f == 2){
           watt = effect * 24;
-      } 
-      output = "{\"Sequence\":\"" + String(seq) + "\",\"Watt\":\"";
-      output += String(watt) + "\",\"kWh\":\"";
-      output += String(pulse / PULSES_PER_KWH) + "\",\"battery\":\"";
-      output += String(battery) + "\"}";
-
-      output += (crc == packet_crc ? "" : "CRC ERR");
-      Serial.println(output);
+      }
+      float sequence = seq;
+      float wattage = watt;
+      float kwh = pulse / PULSES_PER_KWH;
+      float batt = battery;
+      publishData(sequence, wattage, kwh, batt);
     }
 
     unselect();
@@ -363,13 +461,17 @@ uint16_t crc16(volatile uint8_t *data, size_t n) {
 }
 
 void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+  httpServer.handleClient();
   if (receiveDone()) {
     lastRecievedData = millis();
     // Send data to Mqtt server
-    Serial.println("We got data to send.");
+    Serial.println("INFO: We got data to send");
     // Wait a bit
     //codeLibrary.wait(500);
     delay(500);
   }
-
 }
