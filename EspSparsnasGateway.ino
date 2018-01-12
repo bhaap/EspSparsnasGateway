@@ -15,7 +15,7 @@
 #define RF69_MODE_RX 3    // RX MODE
 #define RF69_MODE_TX 4    // TX MODE
 
-#define SENSOR_ID 643654 //<- ange din 6 siffriga kod här, ta sista 6 siffrorna av 400 666 111. Koden finns i sändaren under batteriet
+#define SENSOR_ID 650337 //<- ange din 6 siffriga kod här, ta sista 6 siffrorna av 400 666 111. Koden finns i sändaren under batteriet
 #define PULSES_PER_KWH 1000 // <- samma här, står på elmätaren
 
 uint32_t FXOSC = 32000000;
@@ -247,7 +247,7 @@ void interruptHandler() {
 
     String output;
 
-    if (TEMPDATA[0] != 0x11 || TEMPDATA[1] != (SENSOR_ID & 0xFF) || TEMPDATA[3] != 0x07 || TEMPDATA[4] != 0x0E || rcv_sensor_id != SENSOR_ID) {
+    if (TEMPDATA[0] != 0x11 || TEMPDATA[1] != (SENSOR_ID & 0xFF) || TEMPDATA[3] != 0x07 || rcv_sensor_id != SENSOR_ID) {
       /*
       output = "Bad package: ";
       for (int i = 0; i < 18; i++) {
@@ -281,11 +281,16 @@ void interruptHandler() {
       int effect = (TEMPDATA[11] << 8 | TEMPDATA[12]);
       int pulse = (TEMPDATA[13] << 24 | TEMPDATA[14] << 16 | TEMPDATA[15] << 8 | TEMPDATA[16]);
       int battery = TEMPDATA[17];
-      float watt =  (float)((3600000 / PULSES_PER_KWH) * 1024) / (effect);
-      output = "Seq " + String(seq) + ": ";
-      output += String(watt) + " W, total: ";
-      output += String(pulse / 1000) + " kWh, battery ";
-      output += String(battery) + "% ";
+      float watt;
+      if(TEMPDATA[4]^0x0f == 1){
+        watt = (float)((3600000 / PULSES_PER_KWH) * 1024) / (effect);
+      } else if(TEMPDATA[4^0x0f == 2){
+          watt = effect * 24;
+      } 
+      output = "{\"Sequence\":\"" + String(seq) + "\",\"Watt\":\"";
+      output += String(watt) + "\",\"kWh\":\"";
+      output += String(pulse / PULSES_PER_KWH) + "\",\"battery\":\"";
+      output += String(battery) + "\"}";
 
       output += (crc == packet_crc ? "" : "CRC ERR");
       Serial.println(output);
