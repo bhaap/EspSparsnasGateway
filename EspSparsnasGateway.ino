@@ -142,7 +142,7 @@ void reconnect() {
 }
 
 
-void publishData(float f_sequence, float f_wattage, float f_kwh, float f_batt) {
+void publishData(float f_sequence, float f_wattage, float f_kwh, float f_batt, float f_crc) {
   // create a JSON object
   // doc : https://github.com/bblanchon/ArduinoJson/wiki/API%20Reference
   StaticJsonBuffer<300> jsonBuffer;
@@ -152,6 +152,7 @@ void publishData(float f_sequence, float f_wattage, float f_kwh, float f_batt) {
   root["watt"] = (String)f_wattage;
   root["kwh"] = (String)f_kwh;
   root["battery"] = (String)f_batt;
+  root["crc"] = (String)f_crc;
   root.prettyPrintTo(Serial);
   Serial.println("");
   /*
@@ -165,6 +166,20 @@ void publishData(float f_sequence, float f_wattage, float f_kwh, float f_batt) {
   char data[300];
   root.printTo(data, root.measureLength() + 1);
   client.publish(MQTT_SENSOR_TOPIC, data, true);
+}
+
+void publishCrc(float f_crc) {
+  // create a JSON object
+  // doc : https://github.com/bblanchon/ArduinoJson/wiki/API%20Reference
+  StaticJsonBuffer<300> jsonBuffer;
+  JsonObject& root2 = jsonBuffer.createObject();
+  // INFO: the data must be converted into a string; a problem occurs when using floats...
+  root2["crc"] = (String)f_crc;
+  root2.prettyPrintTo(Serial);
+  Serial.println("");
+  char data2[300];
+  root2.printTo(data2, root2.measureLength() + 1);
+  client.publish(MQTT_SENSOR_TOPIC, data2, true);
 }
 
 bool initialize(uint32_t frequency) {
@@ -391,7 +406,13 @@ void interruptHandler() {
       float wattage = watt;
       float kwh = pulse / PULSES_PER_KWH;
       float batt = battery;
-      publishData(sequence, wattage, kwh, batt);
+      float crcerr = 0;
+      if(crc != packet_crc){
+        publishData(sequence, wattage, kwh, batt, crcerr);
+      } else if(crc == packet_crc){
+        crcerr = 1;
+        publishCrc(crcerr);
+      }
     }
 
     unselect();
